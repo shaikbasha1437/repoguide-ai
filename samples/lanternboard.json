@@ -1,0 +1,70 @@
+{
+  "name": "LanternBoard / demo snapshot",
+  "ref": "original-mit-snapshot-v1",
+  "demo": true,
+  "truncated": false,
+  "files": [
+    {
+      "path": "README.md",
+      "text": "# LanternBoard\n\nLanternBoard is a fictional team task API for this RepoGuide demo snapshot.\nAll code here is original, MIT licensed, and never executed by RepoGuide.\nThe support URL is https://support.lanternboard.example.\n\n## Architecture\nRequests enter src/api.js. Authentication is checked by src/auth.js.\nThe service layer in src/tasks.js validates writes and enforces team ownership.\nDatabase access lives in src/database.js; schema.sql defines the tables.\nAn in-memory fixed-window rate limiter protects the API per account.\nAudit events contain IDs and action types, not task titles or passwords.\n\n## Setup\nUse Node 20+, install pg, and set DATABASE_URL in your own environment.\nRun schema.sql against a local PostgreSQL database, then call createApi(db).\nThis is a teaching snapshot, not a production deployment or runnable package.\nNever commit credentials. There is no password-reset or MFA implementation.\n\n## API\nGET /tasks lists active tasks for the signed-in user's team.\nPOST /tasks creates a task after title validation.\nPATCH /tasks/:id/complete marks a team-owned task complete.\nDELETE /tasks/:id soft-deletes a task; rows remain for audit history.\n\n## Security boundaries\nPasswords use scrypt with a random salt. Session tokens are random opaque values.\nOnly SHA-256 hashes of session tokens are stored. Sessions expire after 8 hours.\nEvery task query is parameterized and scoped to a team ID.\nThere is no cross-team administration endpoint in this snapshot.\n\n## Testing\nTests demonstrate expiry, team isolation, title validation and the rate limit.\nThe tests use fake database adapters, not a real PostgreSQL server.\n"
+    },
+    {
+      "path": "src/auth.js",
+      "text": "import { randomBytes, scryptSync, timingSafeEqual, createHash } from 'node:crypto';\nconst SESSION_TTL_MS = 8 * 60 * 60 * 1000;\n\nexport function hashPassword(password) {\n  const salt = randomBytes(16).toString('hex');\n  const hash = scryptSync(password, salt, 64).toString('hex');\n  return { salt, hash };\n}\n\nexport function verifyPassword(password, record) {\n  const actual = scryptSync(password, record.salt, 64);\n  const expected = Buffer.from(record.hash, 'hex');\n  return actual.length === expected.length && timingSafeEqual(actual, expected);\n}\n\nexport function tokenHash(token) {\n  return createHash('sha256').update(token).digest('hex');\n}\n\nexport async function createSession(db, user, now = Date.now()) {\n  const token = randomBytes(32).toString('hex');\n  await db.saveSession({ hash: tokenHash(token), userId: user.id,\n    teamId: user.teamId, expiresAt: now + SESSION_TTL_MS });\n  return token;\n}\n\nexport async function authenticate(db, token, now = Date.now()) {\n  if (!token) throw new Error('Unauthorized');\n  const session = await db.findSession(tokenHash(token));\n  if (!session || session.expiresAt <= now) throw new Error('Unauthorized');\n  return { id: session.userId, teamId: session.teamId };\n}\n\nexport async function logout(db, token) {\n  await db.deleteSession(tokenHash(token));\n}\n"
+    },
+    {
+      "path": "src/api.js",
+      "text": "import { authenticate } from './auth.js';\nimport { createTask, completeTask, deleteTask } from './tasks.js';\nimport { allowRequest } from './rate-limit.js';\n\nexport function createApi(db) {\n  return async function handle(request) {\n    // The hosting framework maps thrown errors to HTTP status codes.\n    const user = await authenticate(db, request.bearerToken);\n    if (!allowRequest(user.id)) return { status: 429, error: 'Rate limit' };\n    if (request.method === 'GET' && request.path === '/tasks') {\n      return { status: 200, tasks: await db.listTasks(user.teamId) };\n    }\n    if (request.method === 'POST' && request.path === '/tasks') {\n      return { status: 201, task: await createTask(db, user, request.body) };\n    }\n    if (request.method === 'PATCH' && request.action === 'complete') {\n      return { status: 200, task: await completeTask(db, user, request.taskId) };\n    }\n    if (request.method === 'DELETE') {\n      await deleteTask(db, user, request.taskId);\n      return { status: 204 };\n    }\n    return { status: 404, error: 'Not found' };\n  };\n}\n"
+    },
+    {
+      "path": "src/tasks.js",
+      "text": "import { audit } from './audit.js';\n\nexport function validateTitle(title) {\n  if (typeof title !== 'string') throw new Error('Title is required');\n  const clean = title.trim();\n  if (clean.length < 1 || clean.length > 120) throw new Error('Title must be 1\u2013120 characters');\n  return clean;\n}\n\nexport async function createTask(db, user, input) {\n  const title = validateTitle(input.title);\n  const task = await db.insertTask({ title, teamId: user.teamId, createdBy: user.id });\n  audit('task.created', { taskId: task.id, userId: user.id });\n  return task;\n}\n\nexport async function completeTask(db, user, taskId) {\n  const task = await db.completeTask(taskId, user.teamId);\n  if (!task) throw new Error('Task not found');\n  audit('task.completed', { taskId, userId: user.id });\n  return task;\n}\n\nexport async function deleteTask(db, user, taskId) {\n  const deleted = await db.softDeleteTask(taskId, user.teamId);\n  if (!deleted) throw new Error('Task not found');\n  audit('task.deleted', { taskId, userId: user.id });\n}\n"
+    },
+    {
+      "path": "src/database.js",
+      "text": "// db is a PostgreSQL pool; all values use positional parameters.\nexport function createDatabase(pool) {\n  return {\n    async listTasks(teamId) {\n      const r = await pool.query('SELECT * FROM tasks WHERE team_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC', [teamId]);\n      return r.rows;\n    },\n    async insertTask(task) {\n      const r = await pool.query('INSERT INTO tasks(title, team_id, created_by) VALUES ($1, $2, $3) RETURNING *', [task.title, task.teamId, task.createdBy]);\n      return r.rows[0];\n    },\n    async completeTask(id, teamId) {\n      const r = await pool.query('UPDATE tasks SET completed = TRUE WHERE id = $1 AND team_id = $2 AND deleted_at IS NULL RETURNING *', [id, teamId]);\n      return r.rows[0];\n    },\n    async softDeleteTask(id, teamId) {\n      const r = await pool.query('UPDATE tasks SET deleted_at = NOW() WHERE id = $1 AND team_id = $2 AND deleted_at IS NULL RETURNING id', [id, teamId]);\n      return r.rows[0];\n    },\n    async saveSession(s) {\n      await pool.query('INSERT INTO sessions(token_hash, user_id, team_id, expires_at) VALUES ($1, $2, $3, $4)', [s.hash, s.userId, s.teamId, new Date(s.expiresAt)]);\n    },\n    async findSession(hash) {\n      const r = await pool.query('SELECT * FROM sessions WHERE token_hash = $1', [hash]);\n      const s = r.rows[0];\n      return s && { userId: s.user_id, teamId: s.team_id, expiresAt: new Date(s.expires_at).getTime() };\n    },\n    async deleteSession(hash) {\n      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [hash]);\n    }\n  };\n}\n"
+    },
+    {
+      "path": "src/rate-limit.js",
+      "text": "const buckets = new Map();\nconst WINDOW_MS = 60_000;\nconst MAX_REQUESTS = 30;\n\nexport function allowRequest(userId, now = Date.now()) {\n  let bucket = buckets.get(userId);\n  if (!bucket || now - bucket.start >= WINDOW_MS) {\n    bucket = { start: now, count: 0 };\n    buckets.set(userId, bucket);\n  }\n  bucket.count += 1;\n  return bucket.count <= MAX_REQUESTS;\n}\n\n// Demo limitation: process-local buckets reset on restart, not shared across replicas.\nexport function clearBuckets() { buckets.clear(); }\n"
+    },
+    {
+      "path": "src/audit.js",
+      "text": "const events = [];\nexport function audit(action, ids) {\n  // Only IDs are retained; never task titles, credentials or session tokens.\n  events.push({ action, taskId: ids.taskId, userId: ids.userId, at: Date.now() });\n  if (events.length > 1000) events.shift();\n}\nexport function readAudit() { return events.map(e => ({ ...e })); }\n"
+    },
+    {
+      "path": "schema.sql",
+      "text": "CREATE TABLE teams (\n  id BIGSERIAL PRIMARY KEY,\n  name TEXT NOT NULL\n);\nCREATE TABLE users (\n  id BIGSERIAL PRIMARY KEY,\n  team_id BIGINT NOT NULL REFERENCES teams(id),\n  password_salt TEXT NOT NULL,\n  password_hash TEXT NOT NULL\n);\nCREATE TABLE tasks (\n  id BIGSERIAL PRIMARY KEY,\n  team_id BIGINT NOT NULL REFERENCES teams(id),\n  created_by BIGINT NOT NULL REFERENCES users(id),\n  title VARCHAR(120) NOT NULL,\n  completed BOOLEAN NOT NULL DEFAULT FALSE,\n  deleted_at TIMESTAMPTZ,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\nCREATE TABLE sessions (\n  token_hash TEXT PRIMARY KEY,\n  user_id BIGINT NOT NULL REFERENCES users(id),\n  team_id BIGINT NOT NULL REFERENCES teams(id),\n  expires_at TIMESTAMPTZ NOT NULL\n);\nCREATE INDEX active_tasks_by_team ON tasks(team_id) WHERE deleted_at IS NULL;\n"
+    },
+    {
+      "path": "test/auth.test.js",
+      "text": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { authenticate, hashPassword, verifyPassword } from '../src/auth.js';\n\ntest('expired sessions are rejected', async () => {\n  const db = { findSession: async () => ({ expiresAt: 100 }) };\n  await assert.rejects(() => authenticate(db, 'demo-token', 101), /Unauthorized/);\n});\ntest('passwords are verified against salted hashes', () => {\n  const record = hashPassword('fictional demo passphrase');\n  assert.equal(verifyPassword('fictional demo passphrase', record), true);\n  assert.equal(verifyPassword('a different passphrase', record), false);\n});\n"
+    },
+    {
+      "path": "test/tasks.test.js",
+      "text": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { validateTitle, completeTask } from '../src/tasks.js';\n\ntest('rejects empty titles and overly long titles', () => {\n  assert.throws(() => validateTitle('   '));\n  assert.throws(() => validateTitle('x'.repeat(121)));\n  assert.equal(validateTitle(' Ship demo '), 'Ship demo');\n});\ntest('team ID is forwarded to completion query', async () => {\n  const db = { completeTask: async (id, teamId) => {\n    assert.equal(teamId, 7);\n    return id === 3 ? { id, completed: true } : null;\n  }};\n  await completeTask(db, { id: 1, teamId: 7 }, 3);\n  await assert.rejects(() => completeTask(db, { id: 1, teamId: 7 }, 9));\n});\n"
+    },
+    {
+      "path": "test/rate-limit.test.js",
+      "text": "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { allowRequest, clearBuckets } from '../src/rate-limit.js';\n\ntest('allows thirty requests per minute per account', () => {\n  clearBuckets();\n  for (let i = 0; i < 30; i++) assert.equal(allowRequest('account-a', 0), true);\n  assert.equal(allowRequest('account-a', 1), false);\n  assert.equal(allowRequest('account-b', 1), true);\n  assert.equal(allowRequest('account-a', 60_000), true);\n});\n"
+    },
+    {
+      "path": "docs/deployment.md",
+      "text": "# Deployment notes\nThis fictional project has no hosted service.\nA real deployment would need a web framework, HTTPS, input validation, migrations,\nstructured error handling and a durable shared rate limiter.\nAudit storage is an in-memory ring buffer, not a compliance archive.\nDATABASE_URL is supplied at runtime and must not be committed.\nBackups, key rotation, MFA and password reset are outside this snapshot.\n"
+    },
+    {
+      "path": "LICENSE",
+      "text": "MIT License\nCopyright (c) 2026 LanternBoard demo contributors\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files, to deal in the Software\nwithout restriction, including without limitation the rights to use, copy,\nmodify, merge, publish, distribute, sublicense, and/or sell copies.\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND.\n"
+    }
+  ],
+  "skipped": [
+    {
+      "path": ".env",
+      "reason": "secret file (placeholder; no contents bundled)"
+    },
+    {
+      "path": "node_modules/",
+      "reason": "dependency directory (placeholder)"
+    }
+  ]
+}
