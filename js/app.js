@@ -9,7 +9,7 @@ let cfg={provider:'extractive',model:'',baseUrl:'',key:'',pat:'',embedKey:'',emb
 try{Object.assign(cfg,JSON.parse(localStorage.getItem('rg-settings')||'{}'));}catch{}
 const secrets=()=>[cfg.key,cfg.pat,cfg.embedKey].filter(Boolean);
 function safeError(e){return redact(String(e.message||e),secrets());}
-function toast(message,undo){clearTimeout(toastTimer);$('#toast').innerHTML=`<span>${esc(message)}</span>${undo?'<button id="undo">Undo</button>':''}`;$('#toast').classList.add('show');if(undo)$('#undo').onclick=()=>{undo();$('#toast').classList.remove('show');};toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),12000);}
+function toast(message,undo){clearTimeout(toastTimer);$('#toast').innerHTML=`<span>${esc(message)}</span>${undo?'<button id="undo">Undo</button>':''}`;$('#toast').classList.add('show');if(undo)$('#undo').onclick=()=>{undo();$('#toast').classList.remove('show');};toastTimer=setTimeout(()=>{$('#toast').classList.remove('show');$('#toast').innerHTML='';},12000);}
 function progress(stage,a,b){$('#progress').hidden=false;$('#progress').textContent=`${stage==='fetch'?'FETCH TEXT':stage.toUpperCase()} → ${a||0}${b?' / '+b:''} · tree → filter → chunk → index`;}
 function lock(v){busy=v;for(const id of ['demo','open-repo','clear','reindex','ask','embeddings'])$('#'+id).disabled=v||(!repo&&['clear','reindex','ask','embeddings'].includes(id));$('#zip').disabled=v;}
 function render(){

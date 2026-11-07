@@ -21,12 +21,13 @@ export function redact(text, secrets=[]) {
 export function normalizeFiles(files) {
   const out=[], skipped=[]; let bytes=0;
   for(const f of files){
-    const reason=skipReason(f.path,new TextEncoder().encode(f.text||'').length);
+    const fileBytes=new TextEncoder().encode(f.text||'').length;
+    const reason=skipReason(f.path,fileBytes);
     if(reason) { skipped.push({path:f.path,reason}); continue; }
     if ((f.text||'').split('\n').some(line=>line.length>3000)) { skipped.push({path:f.path,reason:'minified / unusually long line'}); continue; }
     if ((f.text||'').includes('\0')) { skipped.push({path:f.path,reason:'binary content'}); continue; }
-    if(out.length>=LIMITS.files||bytes+f.text.length>LIMITS.totalBytes) {skipped.push({path:f.path,reason:'snapshot limit'});continue;}
-    const text=redact(f.text.replace(/\r\n?/g,'\n')); bytes+=text.length; out.push({path:f.path,text});
+    if(out.length>=LIMITS.files||bytes+fileBytes>LIMITS.totalBytes) {skipped.push({path:f.path,reason:'snapshot limit'});continue;}
+    const text=redact(f.text.replace(/\r\n?/g,'\n')); bytes+=fileBytes; out.push({path:f.path,text});
   }
   return {files:out,skipped};
 }

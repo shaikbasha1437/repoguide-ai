@@ -27,5 +27,5 @@ export async function loadGithub(input,branch,token='',deps={}){
   const bytes=Uint8Array.from(atob(blob.content.replace(/\s/g,'')),c=>c.charCodeAt(0));
   const text=new TextDecoder().decode(bytes);total+=bytes.length;files.push({path:e.path,text});
  }
- const safe=normalizeFiles(files);return {name:owner+'/'+repo,ref:commit.sha,files:safe.files,skipped:skipped.concat(safe.skipped),truncated:!!tree.truncated||skipped.some(x=>/limit/.test(x.reason)),demo:false};
+ const safe=normalizeFiles(files);if(!safe.files.length)throw Error('No supported source files were fetched within the snapshot / quota budget. Previous workspace preserved.');return {name:owner+'/'+repo,ref:commit.sha,files:safe.files,skipped:skipped.concat(safe.skipped),truncated:!!tree.truncated||skipped.some(x=>/limit/.test(x.reason)),demo:false};
 }
