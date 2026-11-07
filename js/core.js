@@ -23,6 +23,7 @@ export function normalizeFiles(files) {
   for(const f of files){
     const reason=skipReason(f.path,new TextEncoder().encode(f.text||'').length);
     if(reason) { skipped.push({path:f.path,reason}); continue; }
+    if ((f.text||'').split('\n').some(line=>line.length>3000)) { skipped.push({path:f.path,reason:'minified / unusually long line'}); continue; }
     if ((f.text||'').includes('\0')) { skipped.push({path:f.path,reason:'binary content'}); continue; }
     if(out.length>=LIMITS.files||bytes+f.text.length>LIMITS.totalBytes) {skipped.push({path:f.path,reason:'snapshot limit'});continue;}
     const text=redact(f.text.replace(/\r\n?/g,'\n')); bytes+=text.length; out.push({path:f.path,text});
@@ -50,7 +51,7 @@ export function buildIndex(files){
   const chunks=files.flatMap(chunkFile), df={}, docs=chunks.map(c=>{const ts=tokens(c.path+' '+c.text),tf={};for(const t of ts)tf[t]=(tf[t]||0)+1;for(const t of Object.keys(tf))df[t]=(df[t]||0)+1;return {tf,len:ts.length};});
   return {chunks,docs,df,avg:docs.reduce((s,d)=>s+d.len,0)/(docs.length||1)};
 }
-const SYN={auth:['authentication','login','session','token'],database:['database','query','sql','repository'],test:['test','assert'],architecture:['readme','api','database'],rate:['rate','limit'],store:['database','save'],password:['password','scrypt']};
+const SYN={authentication:['authenticate','auth','session','password'],architecture:['readme','api','database','organization'],auth:['authentication','login','session','token'],database:['database','query','sql','repository'],test:['test','assert'],rate:['rate','limit'],store:['database','save'],password:['password','scrypt']};
 export function retrieve(index,question,limit=5,vectors=null,queryVector=null){
   const ts=[...new Set(tokens(question))];for(const t of [...ts]) if(SYN[t]) ts.push(...SYN[t].flatMap(tokens));
   const scores=index.docs.map((d,i)=>{let score=0;for(const t of new Set(ts)){const n=d.tf[t]||0;if(!n)continue;const idf=Math.log(1+(index.docs.length-(index.df[t]||0)+.5)/((index.df[t]||0)+.5));score+=idf*(n*2.2)/(n+1.2*(.25+.75*d.len/(index.avg||1)));}return {i,score};}).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
@@ -58,14 +59,23 @@ export function retrieve(index,question,limit=5,vectors=null,queryVector=null){
   return scores.slice(0,limit).map(x=>({...index.chunks[x.i],score:x.score}));
 }
 export function cosine(a,b){if(a.length!==b.length||!a.length)return 0;let dot=0,aa=0,bb=0;for(let i=0;i<a.length;i++){dot+=a[i]*b[i];aa+=a[i]*a[i];bb+=b[i]*b[i];}return aa&&bb?dot/Math.sqrt(aa*bb):0;}
-export function extractiveAnswer(hits){
+export function evidenceQuote(chunk,question='') {
+  const lines=chunk.text.split('\n');
+  if(chunk.text.length<=600)return chunk.text;
+  const ts=[...new Set(tokens(question))];for(const t of [...ts])if(SYN[t])ts.push(...SYN[t].flatMap(tokens));
+  let best=0,score=-1;
+  for(let i=0;i<lines.length;i++){const window=lines.slice(i,i+8).join('\n'),ws=tokens(window);const n=ts.reduce((s,t)=>s+ws.filter(w=>w===t).length,0);if(n>score){score=n;best=i;}}
+  const selected=[];let chars=0;for(let i=best;i<lines.length&&selected.length<8;i++){if(chars+lines[i].length>700&&selected.length)break;selected.push(lines[i]);chars+=lines[i].length+1;}
+  return selected.join('\n').slice(0,1500);
+}
+export function extractiveAnswer(hits,question=''){
   if(!hits.length)return {claims:[],notice:'No matching evidence. Try a file name or a more specific question.',mode:'extractive'};
-  return {mode:'extractive',notice:'Extractive mode — source excerpts, not an AI explanation. These may only partially answer your question.',claims:hits.slice(0,3).map(c=>({text:'Relevant source excerpt from '+c.path,citations:[{id:c.id,quote:c.text.slice(0,500)}],extractive:true}))};
+  return {mode:'extractive',notice:'Extractive mode — source excerpts, not an AI explanation. These may only partially answer your question.',claims:hits.slice(0,3).map(c=>({text:'Relevant source excerpt from '+c.path,citations:[{id:c.id,quote:evidenceQuote(c,question)}],extractive:true}))};
 }
 export function validateAnswer(answer,hits){
   const list=Array.isArray(answer.claims)?answer.claims.slice(0,12):[];
   return list.map(claim=>{
-    const citations=(Array.isArray(claim.citations)?claim.citations:[]).map(c=>{const hit=hits.find(h=>h.id===c.id);const quote=typeof c.quote==='string'?c.quote:'';return {...c,quote,hit,valid:!!hit&&quote.trim().length>=8&&hit.text.includes(quote)};});
+    const citations=(Array.isArray(claim.citations)?claim.citations:[]).map(c=>{const hit=hits.find(h=>h.id===c.id);const quote=typeof c.quote==='string'?c.quote:'';const valid=!!hit&&quote.trim().length>=8&&hit.text.includes(quote); let range=hit;if(valid){const offset=hit.text.indexOf(quote);const start=hit.start+hit.text.slice(0,offset).split('\n').length-1;range={...hit,start,end:start+quote.split('\n').length-1};}return {...c,quote,hit:range,valid};});
     const reasons=[];if(!citations.length||citations.some(c=>!c.valid))reasons.push('Missing or invalid citation / quote');
     if(!claim.extractive){const terms=[...new Set(tokens(claim.text))];const evidence=tokens(citations.filter(c=>c.valid).map(c=>c.quote).join(' '));const coverage=terms.filter(t=>evidence.includes(t)).length/(terms.length||1);if(coverage<.35)reasons.push('Claim wording is weakly supported by its quoted evidence');const nums=String(claim.text).match(/\b\d+(?:\.\d+)?\b/g)||[];if(nums.some(n=>!citations.some(c=>c.quote.includes(n))))reasons.push('Number not found in quoted evidence');}
     return {text:String(claim.text||''),citations,flags:reasons};
