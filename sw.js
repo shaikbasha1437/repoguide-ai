@@ -1,4 +1,4 @@
-const CACHE='repoguide-v3';
+const CACHE='repoguide-v4';
 const FILES=['./','./index.html','./styles.css','./js/app.js','./js/core.js','./js/github.js','./js/storage.js','./js/embeddings.js','./js/llm.js','./vendor/fflate.js','./samples/lanternboard.json','./manifest.webmanifest','./icons/icon.svg','./icons/icon-192.png','./icons/icon-512.png'];
 self.addEventListener('install',event=>{event.waitUntil((async()=>{const cache=await caches.open(CACHE);for(const file of FILES){try{const response=await fetch(file,{cache:'reload'});if(response.ok)await cache.put(file,response);}catch{}}await self.skipWaiting();})());});
 self.addEventListener('activate',event=>{event.waitUntil((async()=>{for(const k of await caches.keys())if(k.startsWith('repoguide-')&&k!==CACHE)await caches.delete(k);await self.clients.claim();})());});

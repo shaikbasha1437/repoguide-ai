@@ -2,7 +2,7 @@
 
 **Follow the code. Trace every answer to the source.**
 
-[Open the app](https://shaikbasha1437.github.io/repoguide-ai/) · AI-agent project 05
+[Open the app](https://shaikbasha1437.github.io/repoguide-ai/)
 
 A free, static, local-first codebase Q&A agent. No backend, account or model key required for extractive mode. Import a GitHub repository or a source ZIP, build an index in your browser, ask questions, and jump from each answer to the cited file and highlighted lines.
 
